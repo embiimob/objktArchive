@@ -364,9 +364,8 @@
 
     const $ = id => document.getElementById(id);
     const norm = v => typeof v === 'string' ? v.trim() : '';
-    const decHtml = t => norm(t).replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>').replace(/&quot;/gi,'"').replace(/&#0?39;|&apos;/gi,"'");
     const esc = t => String(t ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-    const sanitize = msg => decHtml(norm(msg)).replace(/[<>]/g,' ');
+    const sanitize = msg => norm(String(msg ?? '')).replace(/[<>]/g,' ');
     const utf8len = v => new TextEncoder().encode(String(v ?? '')).length;
     const isAddr = v => ADDR_RE.test(norm(v));
     const shortAddr = v => { const t = norm(v); return t.length > 16 ? `${t.slice(0,8)}…${t.slice(-5)}` : t; };
@@ -932,7 +931,7 @@
       const mh = await msgHash(text);
       const { r, s, recoveryId } = await ecSign(S.priv, mh);
       const c = new Uint8Array(65); c[0] = 27 + 4 + recoveryId; c.set(bi2b32(r), 1); c.set(bi2b32(s), 33);
-      return btoa(String.fromCharCode.apply(null, c));
+      return btoa(String.fromCharCode(...c));
     }
     async function deriveKeywordAddress(keyword) {
       const tok = norm(keyword).replace(/^#/, '');
