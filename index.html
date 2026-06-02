@@ -1072,6 +1072,7 @@
                 token {
                   token_id
                   fa_contract
+                  creator_address
                   name
                   description
                   artifact_uri
@@ -1110,6 +1111,7 @@
               token {
                 token_id
                 fa_contract
+                creator_address
                 name
                 description
                 artifact_uri
@@ -1158,6 +1160,7 @@
         sourceLabel: entry.source === 'created' ? 'objkt / created' : 'objkt / owned',
         ownerAddress: user.address,
         ownerAlias: user.alias || user.tzdomain || user.raw || user.address,
+        creatorAddress: norm(token.creator_address),
         contract: norm(token.fa_contract),
         tokenId: String(token.token_id ?? ''),
         name: norm(token.name) || '(untitled)',
@@ -1365,11 +1368,8 @@
       const prefix = sanitize($('messagePrefixInput').value);
       const bits = [];
       if (prefix) bits.push(prefix);
-      const artistName = norm(objkt?.ownerAlias) || norm(objkt?.ownerAddress);
-      if (artistName) {
-        const attributionLabel = objkt?.source === 'owned' ? 'Owner' : 'Artist';
-        bits.push(`${attributionLabel}: ${artistName}`);
-      }
+      const artistName = norm(objkt?.creatorAddress) || norm(objkt?.ownerAddress);
+      if (artistName) bits.push(`Artist: ${artistName}`);
       if (objkt?.name) bits.push(objkt.name);
       if (objkt?.description) bits.push(objkt.description);
       if (objkt?.tokenUrl) bits.push(`View on objkt: ${objkt.tokenUrl}`);
