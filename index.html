@@ -573,8 +573,8 @@
     function extractCidsFromText(input) {
       const found = [];
       const text = String(input ?? '');
-      const matches = text.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44})/ig) || [];
-      matches.forEach(cid => found.push(cid));
+      const matches = text.match(/\b(Qm[1-9A-HJ-NP-Za-km-z]{44})\b/ig) || [];
+      matches.forEach(cid => { if (CID_RE.test(cid)) found.push(cid); });
       return unique(found);
     }
 
