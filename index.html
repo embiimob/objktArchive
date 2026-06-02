@@ -535,6 +535,40 @@
       return `${getGatewayBase()}${cid}${path ? `/${path.replace(/^\/+/, '')}` : ''}`;
     }
 
+    function extFromMime(mime) {
+      const value = norm(mime).toLowerCase().split(';')[0].trim();
+      const map = {
+        'image/gif': 'gif',
+        'image/jpeg': 'jpg',
+        'image/jpg': 'jpg',
+        'image/png': 'png',
+        'image/webp': 'webp',
+        'image/svg+xml': 'svg',
+        'video/mp4': 'mp4',
+        'audio/mpeg': 'mp3',
+        'audio/mp3': 'mp3',
+        'audio/wav': 'wav',
+        'audio/x-wav': 'wav',
+        'application/pdf': 'pdf',
+        'application/json': 'json',
+        'text/plain': 'txt',
+        'text/html': 'html',
+        'model/gltf+json': 'gltf',
+        'model/gltf-binary': 'glb',
+      };
+      return map[value] || '';
+    }
+
+    function ensureAttachmentFilename(path, mime = '') {
+      const clean = norm(path).replace(/^\/+/, '').split('/').map(p => p.replace(UNSAFE_RE, '')).filter(Boolean).join('/');
+      const segments = clean ? clean.split('/').filter(Boolean) : [];
+      const tail = segments[segments.length - 1] || '';
+      if (/\.[a-z0-9]{1,16}$/i.test(tail)) return clean;
+      const fallback = `artifact.${extFromMime(mime) || 'bin'}`;
+      if (!clean) return fallback;
+      return `${clean}/${fallback}`;
+    }
+
     function extractIpfsParts(v) {
       const input = norm(v);
       if (!input) return null;
@@ -556,12 +590,12 @@
       return null;
     }
 
-    async function normalizeAttach(raw) {
+    async function normalizeAttach(raw, options = {}) {
       const input = norm(raw);
       if (!input) throw new Error('Missing attachment reference');
       const ipfs = extractIpfsParts(input);
       if (!ipfs?.cid) throw new Error('Attachment must contain an IPFS CID');
-      const safePath = norm(ipfs.path || '').replace(/^\/+/, '').split('/').map(p => p.replace(UNSAFE_RE, '')).filter(Boolean).join('/');
+      const safePath = ensureAttachmentFilename(ipfs.path || '', options.mime || '');
       return {
         cid: ipfs.cid,
         path: safePath,
@@ -1132,6 +1166,7 @@
         displayUri: norm(token.display_uri),
         thumbnailUri: norm(token.thumbnail_uri),
         metadataUri: norm(token.metadata),
+        mime: norm(token.mime),
         cid,
         urn,
         path: artifactInfo?.path || '',
@@ -1353,7 +1388,7 @@
           return;
         }
         const objkt = row.objktItems[0];
-        const attach = await normalizeAttach(objkt.urn || objkt.artifactUri || objkt.displayUri || `IPFS:${cid}`);
+        const attach = await normalizeAttach(objkt.urn || objkt.artifactUri || objkt.displayUri || `IPFS:${cid}`, { mime: objkt.mime || '' });
         const outputs = await buildMsgOutputs({
           text: buildSyncText(row),
           attachments: [attach.canonical],
