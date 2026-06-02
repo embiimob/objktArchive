@@ -1081,6 +1081,12 @@
                   supply
                   metadata
                   timestamp
+                  creators {
+                    holder {
+                      alias
+                      address
+                    }
+                  }
                 }
               }
             }
@@ -1119,6 +1125,12 @@
                 supply
                 metadata
                 timestamp
+                creators {
+                  holder {
+                    alias
+                    address
+                  }
+                }
               }
             }
           }
@@ -1153,12 +1165,17 @@
       const artifactInfo = extractIpfsParts(token.artifact_uri || '') || extractIpfsParts(token.display_uri || '') || extractIpfsParts(token.thumbnail_uri || '') || extractIpfsParts(token.metadata || '');
       const cid = artifactInfo?.cid || '';
       const urn = artifactInfo ? `IPFS:${artifactInfo.cid}${artifactInfo.path ? `/${artifactInfo.path}` : ''}` : '';
+      const artistAlias = (Array.isArray(token.creators) ? token.creators : [])
+        .map(item => norm(item?.holder?.alias) || norm(item?.holder?.address))
+        .filter(Boolean)
+        .filter((value, index, list) => list.indexOf(value) === index)
+        .join(', ');
       return {
         source: entry.source,
         sourceLabel: entry.source === 'created' ? 'objkt / created' : 'objkt / owned',
         ownerAddress: user.address,
         ownerAlias: user.alias || user.tzdomain || user.raw || user.address,
-        artistAlias: entry.source === 'created' ? (user.alias || user.tzdomain || user.raw || user.address) : '',
+        artistAlias: artistAlias || (entry.source === 'created' ? (user.alias || user.tzdomain || user.raw || user.address) : ''),
         contract: norm(token.fa_contract),
         tokenId: String(token.token_id ?? ''),
         name: norm(token.name) || '(untitled)',
