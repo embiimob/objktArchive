@@ -1368,8 +1368,10 @@
       const prefix = sanitize($('messagePrefixInput').value);
       const bits = [];
       if (prefix) bits.push(prefix);
-      const creatorAddress = norm(objkt?.creatorAddress) || norm(objkt?.ownerAddress);
+      const creatorAddress = norm(objkt?.creatorAddress);
+      const ownerAddress = norm(objkt?.ownerAddress);
       if (creatorAddress) bits.push(`Creator address: ${creatorAddress}`);
+      else if (ownerAddress) bits.push(`Owner address: ${ownerAddress}`);
       if (objkt?.name) bits.push(objkt.name);
       if (objkt?.description) bits.push(objkt.description);
       if (objkt?.tokenUrl) bits.push(`View on objkt: ${objkt.tokenUrl}`);
