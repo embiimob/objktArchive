@@ -1366,10 +1366,13 @@
       const bits = [];
       if (prefix) bits.push(prefix);
       const artistName = norm(objkt?.ownerAlias) || norm(objkt?.ownerAddress);
-      if (artistName) bits.push(`Artist: ${artistName}`);
+      if (artistName) {
+        const attributionLabel = objkt?.source === 'owned' ? 'Owner' : 'Artist';
+        bits.push(`${attributionLabel}: ${artistName}`);
+      }
       if (objkt?.name) bits.push(objkt.name);
       if (objkt?.description) bits.push(objkt.description);
-      if (objkt?.tokenUrl) bits.push(`objkt: ${objkt.tokenUrl}`);
+      if (objkt?.tokenUrl) bits.push(`View on objkt: ${objkt.tokenUrl}`);
       bits.push(`#${S.keyword}`);
       getExtraKeywords().forEach(tag => bits.push(`#${tag}`));
       return bits.filter(Boolean).join('\n\n');
