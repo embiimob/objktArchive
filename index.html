@@ -335,7 +335,7 @@
     const MAX_IPFS_BYTES = 100 * 1024 * 1024;
     const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
     const DELIMITERS = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
-    const CID_RE = /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[1-9A-HJ-NP-Za-km-z]{20,})$/i;
+    const CID_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/i;
     const IPFS_PATH_RE = /^\/?ipfs\/([a-zA-Z0-9]+)(?:\/(.*))?$/i;
     const UNSAFE_RE = /[^a-zA-Z0-9._-]/g;
     const ADDR_RE = /^[mn][1-9A-HJ-NP-Za-km-z]{25,34}$/;
@@ -544,14 +544,14 @@
         const cid = norm(first || '');
         return CID_RE.test(cid) ? { cid, path: parts.join('/') } : null;
       }
-      const loose = input.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[1-9A-HJ-NP-Za-km-z]{20,})(?:[\\/]+([^<>\s]+))?/i);
+      const loose = input.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44})(?:[\\/]+([^<>\s]+))?/i);
       if (loose) return { cid: loose[1], path: norm(loose[2] || '') };
       try {
         const u = new URL(input);
         const hostSplit = norm(u.hostname).split('.ipfs.');
         if (hostSplit.length > 1 && CID_RE.test(hostSplit[0])) return { cid: hostSplit[0], path: norm(u.pathname).replace(/^\/+/, '') };
         const pathMatch = norm(u.pathname).match(IPFS_PATH_RE);
-        if (pathMatch) return { cid: pathMatch[1], path: norm(pathMatch[2] || '') };
+        if (pathMatch && CID_RE.test(pathMatch[1])) return { cid: pathMatch[1], path: norm(pathMatch[2] || '') };
       } catch {}
       return null;
     }
@@ -573,7 +573,7 @@
     function extractCidsFromText(input) {
       const found = [];
       const text = String(input ?? '');
-      const matches = text.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44}|bafy[1-9A-HJ-NP-Za-km-z]{20,})/ig) || [];
+      const matches = text.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44})/ig) || [];
       matches.forEach(cid => found.push(cid));
       return unique(found);
     }
