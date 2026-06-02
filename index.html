@@ -1365,6 +1365,8 @@
       const prefix = sanitize($('messagePrefixInput').value);
       const bits = [];
       if (prefix) bits.push(prefix);
+      const artist = norm(objkt?.ownerAlias) || norm(objkt?.ownerAddress);
+      if (artist) bits.push(`Artist: ${artist}`);
       if (objkt?.name) bits.push(objkt.name);
       if (objkt?.description) bits.push(objkt.description);
       bits.push(`#${S.keyword}`);
