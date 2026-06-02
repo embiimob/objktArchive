@@ -226,7 +226,7 @@
         <h2>Wallet</h2>
         <div class="field">
           <label for="wifInput">SupSpace WIF</label>
-          <input id="wifInput" placeholder="c... / 9... testnet3 legacy WIF" autocomplete="off" spellcheck="false">
+          <input id="wifInput" type="password" placeholder="c... / 9... testnet3 legacy WIF" autocomplete="off" spellcheck="false">
         </div>
         <div class="btn-row">
           <button id="unlockBtn" class="primary">Unlock wallet</button>
@@ -483,7 +483,7 @@
             </td>
             <td>
               <div><strong>${esc(objkt?.name || '—')}</strong></div>
-              <div class="mini">${esc(objkt?.sourceLabel || '—')}</div>
+              ${objkt?.artistAlias ? `<div class="mini">Artist: ${esc(objkt.artistAlias)}</div>` : `<div class="mini">${esc(objkt?.sourceLabel || '—')}</div>`}
               ${objkt?.tokenUrl ? `<div class="mini"><a href="${esc(objkt.tokenUrl)}" target="_blank" rel="noreferrer">objkt token</a></div>` : ''}
             </td>
             <td>
@@ -1072,7 +1072,6 @@
                 token {
                   token_id
                   fa_contract
-                  creator_address
                   name
                   description
                   artifact_uri
@@ -1111,7 +1110,6 @@
               token {
                 token_id
                 fa_contract
-                creator_address
                 name
                 description
                 artifact_uri
@@ -1160,7 +1158,7 @@
         sourceLabel: entry.source === 'created' ? 'objkt / created' : 'objkt / owned',
         ownerAddress: user.address,
         ownerAlias: user.alias || user.tzdomain || user.raw || user.address,
-        creatorAddress: norm(token.creator_address),
+        artistAlias: entry.source === 'created' ? (user.alias || user.tzdomain || user.raw || user.address) : '',
         contract: norm(token.fa_contract),
         tokenId: String(token.token_id ?? ''),
         name: norm(token.name) || '(untitled)',
@@ -1368,10 +1366,8 @@
       const prefix = sanitize($('messagePrefixInput').value);
       const bits = [];
       if (prefix) bits.push(prefix);
-      const creatorAddress = norm(objkt?.creatorAddress);
-      const ownerAddress = norm(objkt?.ownerAddress);
-      if (creatorAddress) bits.push(`Creator address: ${creatorAddress}`);
-      else if (ownerAddress) bits.push(`Owner address: ${ownerAddress}`);
+      const artistAlias = norm(objkt?.artistAlias);
+      if (artistAlias) bits.push(`Artist: ${artistAlias}`);
       if (objkt?.name) bits.push(objkt.name);
       if (objkt?.description) bits.push(objkt.description);
       if (objkt?.tokenUrl) bits.push(`View on objkt: ${objkt.tokenUrl}`);
