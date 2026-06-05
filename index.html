@@ -342,6 +342,10 @@
     const TXID_RE = /^[0-9a-fA-F]{64}$/;
 
     const FEE_CACHE_TTL = 5 * 60 * 1000;
+    const AUTO_SYNC_TICK_MS = 60 * 1000;
+    const DIFF_RECHECK_MS = 60 * 60 * 1000;
+    const QUEUE_DISPLAY_LIMIT = 10;
+    const CONFIRMED_DISPLAY_LIMIT = 5;
 
     const S = {
       priv: null,
@@ -360,6 +364,8 @@
       syncTimer: null,
       syncBusy: false,
       lastBroadcastTxid: '',
+      nextDiffQueryAt: null,
+      diffQueryRunning: false,
       sizeCache: new Map(),
       syncStateByCid: new Map(),
       feeRateCache: null,
@@ -420,24 +426,32 @@
     function renderSummary() {
       const rows = S.comparisonRows || [];
       const totals = {
-        p2fk: S.p2fkItems.length,
         objkt: S.objktItems.length,
-        matched: rows.filter(r => r.hasObjkt && r.hasP2fk).length,
-        missing: rows.filter(r => r.hasObjkt && !r.hasP2fk).length,
-        chainOnly: rows.filter(r => !r.hasObjkt && r.hasP2fk).length,
-        tooLarge: rows.filter(r => r.syncState?.status === 'too-large').length,
-        queued: rows.filter(r => r.syncState?.status === 'queued').length,
-        synced: rows.filter(r => ['broadcasted','confirmed'].includes(r.syncState?.status)).length,
+        p2fk: S.p2fkItems.length,
+        queued: 0,
+        syncing: 0,
+        broadcasted: 0,
+        confirmed: 0,
+        tooLarge: 0,
       };
+      rows.forEach(row => {
+        const status = getSyncState(row.cid).status;
+        if (status === 'queued') totals.queued += 1;
+        if (status === 'syncing') totals.syncing += 1;
+        if (status === 'broadcasted') totals.broadcasted += 1;
+        if (status === 'confirmed') totals.confirmed += 1;
+        if (status === 'too-large') totals.tooLarge += 1;
+      });
       const items = [
         ['Keyword address', S.keywordAddress || '—'],
-        ['p2fk refs', totals.p2fk],
         ['objkt refs', totals.objkt],
-        ['Matched', totals.matched],
-        ['Missing on p2fk', totals.missing],
-        ['p2fk only', totals.chainOnly],
+        ['p2fk refs', totals.p2fk],
+        [`Queue waiting (top ${QUEUE_DISPLAY_LIMIT} shown)`, totals.queued],
+        [`Recently confirmed (last ${CONFIRMED_DISPLAY_LIMIT} shown)`, totals.confirmed],
+        ['Currently syncing', totals.syncing],
+        ['Broadcasted waiting confirm', totals.broadcasted],
         ['Too large', totals.tooLarge],
-        ['Queued/sent', `${totals.queued}/${totals.synced}`],
+        ['Auto sync active', S.syncRunning ? 'yes' : 'no'],
       ];
       $('summaryGrid').innerHTML = items.map(([k, v]) => `<div class="summary-item"><span class="muted">${esc(k)}</span><strong>${esc(String(v))}</strong></div>`).join('');
     }
@@ -449,6 +463,8 @@
 
     function setSyncState(cid, patch) {
       const next = { ...(S.syncStateByCid.get(cid) || {}), ...patch };
+      if (patch.status === 'queued' && !next.queuedAt) next.queuedAt = Date.now();
+      if (patch.status === 'confirmed' && !next.confirmedAt) next.confirmedAt = Date.now();
       S.syncStateByCid.set(cid, next);
       const row = (S.comparisonRows || []).find(item => item.cid === cid);
       if (row) row.syncState = next;
@@ -459,23 +475,29 @@
     function renderComparison() {
       const body = $('comparisonBody');
       const rows = S.comparisonRows || [];
-      if (!rows.length) {
-        body.innerHTML = '<tr><td colspan="6" class="muted">No analysis yet.</td></tr>';
+      const rowsWithState = rows.map(row => ({ row, state: getSyncState(row.cid) }));
+      const queueRows = rowsWithState
+        .filter(item => item.state.status === 'queued')
+        .sort((a, b) => (a.state.queueRank ?? Number.MAX_SAFE_INTEGER) - (b.state.queueRank ?? Number.MAX_SAFE_INTEGER))
+        .slice(0, QUEUE_DISPLAY_LIMIT);
+      const confirmedRows = rowsWithState
+        .filter(item => item.state.status === 'confirmed')
+        .sort((a, b) => (b.state.confirmedAt || 0) - (a.state.confirmedAt || 0))
+        .slice(0, CONFIRMED_DISPLAY_LIMIT);
+      const displayRows = [...queueRows, ...confirmedRows];
+      if (!displayRows.length) {
+        body.innerHTML = '<tr><td colspan="6" class="muted">No queued items and no recent confirmations yet.</td></tr>';
         renderSummary();
         return;
       }
-      body.innerHTML = rows.map(row => {
+      body.innerHTML = displayRows.map(({ row, state }) => {
         const objkt = row.objktItems[0] || null;
         const p2fk = row.p2fkItems[0] || null;
-        const state = row.syncState || {};
         const statusPills = [];
-        if (row.hasObjkt && row.hasP2fk) statusPills.push('<span class="pill good">Matched</span>');
-        if (row.hasObjkt && !row.hasP2fk) statusPills.push('<span class="pill warn">Missing on p2fk</span>');
-        if (!row.hasObjkt && row.hasP2fk) statusPills.push('<span class="pill bad">Only on p2fk</span>');
-        if (state.status === 'queued') statusPills.push('<span class="pill warn">Queued</span>');
+        if (state.status === 'queued') statusPills.push('<span class="pill warn">Queued (waiting)</span>');
         if (state.status === 'syncing') statusPills.push('<span class="pill warn">Syncing</span>');
         if (state.status === 'broadcasted') statusPills.push('<span class="pill warn">Broadcasted</span>');
-        if (state.status === 'confirmed') statusPills.push('<span class="pill good">Confirmed</span>');
+        if (state.status === 'confirmed') statusPills.push('<span class="pill good">Confirmed (recent)</span>');
         if (state.status === 'too-large') statusPills.push('<span class="pill bad">Over 100 MB</span>');
         if (state.status === 'error') statusPills.push(`<span class="pill bad">${esc(shortText(state.error || 'Error', 50))}</span>`);
         const sizeText = row.sizeBytes ? fmtBytes(row.sizeBytes) : (state.sizeBytes ? fmtBytes(state.sizeBytes) : 'not checked');
@@ -1475,15 +1497,48 @@
         .filter(row => !['broadcasted', 'confirmed', 'too-large', 'syncing'].includes(getSyncState(row.cid).status))
         .map(row => row.cid);
       S.syncQueue = queue;
-      queue.forEach(cid => setSyncState(cid, { status: 'queued' }));
+      queue.forEach((cid, idx) => setSyncState(cid, { status: 'queued', queueRank: idx }));
       return queue.length;
+    }
+
+    async function runDifferenceQuery() {
+      if (!S.keyword || !S.objktUser) throw new Error('Run analysis before auto difference checks.');
+      if (S.diffQueryRunning) return 0;
+      S.diffQueryRunning = true;
+      try {
+        appendLog(`Running difference query for #${S.keyword} and ${S.objktUser.address}…`);
+        const [p2fkItems, objktItems] = await Promise.all([loadP2fkItems(S.keyword), loadObjktItems(S.objktUser)]);
+        S.p2fkItems = p2fkItems;
+        S.objktItems = objktItems.filter(item => item.cid);
+        buildComparisonRows();
+        const queued = queueUnmatched();
+        S.nextDiffQueryAt = queued ? null : Date.now() + DIFF_RECHECK_MS;
+        if (queued) appendLog(`Found ${queued} item(s) waiting to sync from fresh difference query.`, 'good');
+        else appendLog('No new objkt differences found. Next difference query in 1 hour.', 'warn');
+        return queued;
+      } finally {
+        S.diffQueryRunning = false;
+      }
     }
 
     async function processAutoSync() {
       if (!S.syncRunning || S.syncBusy) return;
       if (!S.syncQueue.length) {
-        appendLog('Auto sync queue is empty. Stopping.', 'good');
-        stopAutoSync();
+        if (S.nextDiffQueryAt == null) {
+          S.nextDiffQueryAt = Date.now() + DIFF_RECHECK_MS;
+          appendLog('Queue is empty. Waiting 1 hour before the next difference query.', 'warn');
+        }
+        if (Date.now() < S.nextDiffQueryAt) return;
+        S.syncBusy = true;
+        try {
+          await runDifferenceQuery();
+        } catch (error) {
+          appendLog(`Difference query failed: ${error.message}`, 'bad');
+          S.nextDiffQueryAt = Date.now() + DIFF_RECHECK_MS;
+        } finally {
+          S.syncBusy = false;
+          renderSummary();
+        }
         return;
       }
       S.syncBusy = true;
@@ -1522,16 +1577,12 @@
         return;
       }
       const count = queueUnmatched();
-      if (!count) {
-        appendLog('No unmatched objkt CIDs remain to sync.', 'good');
-        setStatus('analysisStatus', 'No unmatched objkt CIDs remain to sync.', 'good');
-        return;
-      }
       if (S.syncTimer) clearInterval(S.syncTimer);
       S.syncRunning = true;
-      S.syncTimer = setInterval(processAutoSync, 60000);
-      appendLog(`Auto sync started for ${count} unmatched CID(s). It will only etch the next item after balances and the prior tx are confirmed.`, 'good');
-      setStatus('analysisStatus', `Auto sync started for ${count} unmatched CID(s).`, 'good');
+      S.nextDiffQueryAt = null;
+      S.syncTimer = setInterval(processAutoSync, AUTO_SYNC_TICK_MS);
+      appendLog(`Auto sync started with ${count} queued unmatched CID(s). It syncs one-by-one after confirmations and reruns the difference query every hour when the queue is empty.`, 'good');
+      setStatus('analysisStatus', `Auto sync started with ${count} queued unmatched CID(s).`, 'good');
       processAutoSync();
     }
 
@@ -1539,6 +1590,7 @@
       S.syncRunning = false;
       if (S.syncTimer) clearInterval(S.syncTimer);
       S.syncTimer = null;
+      S.nextDiffQueryAt = null;
       appendLog('Auto sync stopped.');
       setStatus('analysisStatus', 'Auto sync stopped.', 'warn');
     }
