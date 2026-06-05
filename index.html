@@ -428,18 +428,26 @@
       const totals = {
         objkt: S.objktItems.length,
         p2fk: S.p2fkItems.length,
-        queued: rows.filter(r => getSyncState(r.cid).status === 'queued').length,
-        syncing: rows.filter(r => getSyncState(r.cid).status === 'syncing').length,
-        broadcasted: rows.filter(r => getSyncState(r.cid).status === 'broadcasted').length,
-        confirmed: rows.filter(r => getSyncState(r.cid).status === 'confirmed').length,
-        tooLarge: rows.filter(r => getSyncState(r.cid).status === 'too-large').length,
+        queued: 0,
+        syncing: 0,
+        broadcasted: 0,
+        confirmed: 0,
+        tooLarge: 0,
       };
+      rows.forEach(row => {
+        const status = getSyncState(row.cid).status;
+        if (status === 'queued') totals.queued += 1;
+        if (status === 'syncing') totals.syncing += 1;
+        if (status === 'broadcasted') totals.broadcasted += 1;
+        if (status === 'confirmed') totals.confirmed += 1;
+        if (status === 'too-large') totals.tooLarge += 1;
+      });
       const items = [
         ['Keyword address', S.keywordAddress || '—'],
         ['objkt refs', totals.objkt],
         ['p2fk refs', totals.p2fk],
-        [`Queue waiting (top ${QUEUE_DISPLAY_LIMIT} shown)`, `${totals.queued} (${Math.min(totals.queued, QUEUE_DISPLAY_LIMIT)} shown)`],
-        [`Recently confirmed (last ${CONFIRMED_DISPLAY_LIMIT} shown)`, `${totals.confirmed} (${Math.min(totals.confirmed, CONFIRMED_DISPLAY_LIMIT)} shown)`],
+        [`Queue waiting (top ${QUEUE_DISPLAY_LIMIT} shown)`, totals.queued],
+        [`Recently confirmed (last ${CONFIRMED_DISPLAY_LIMIT} shown)`, totals.confirmed],
         ['Currently syncing', totals.syncing],
         ['Broadcasted waiting confirm', totals.broadcasted],
         ['Too large', totals.tooLarge],
@@ -467,13 +475,14 @@
     function renderComparison() {
       const body = $('comparisonBody');
       const rows = S.comparisonRows || [];
-      const queueRows = rows
-        .filter(row => getSyncState(row.cid).status === 'queued')
-        .sort((a, b) => (getSyncState(a.cid).queueRank ?? Number.MAX_SAFE_INTEGER) - (getSyncState(b.cid).queueRank ?? Number.MAX_SAFE_INTEGER))
+      const rowsWithState = rows.map(row => ({ row, state: getSyncState(row.cid) }));
+      const queueRows = rowsWithState
+        .filter(item => item.state.status === 'queued')
+        .sort((a, b) => (a.state.queueRank ?? Number.MAX_SAFE_INTEGER) - (b.state.queueRank ?? Number.MAX_SAFE_INTEGER))
         .slice(0, QUEUE_DISPLAY_LIMIT);
-      const confirmedRows = rows
-        .filter(row => getSyncState(row.cid).status === 'confirmed')
-        .sort((a, b) => (getSyncState(b.cid).confirmedAt || 0) - (getSyncState(a.cid).confirmedAt || 0))
+      const confirmedRows = rowsWithState
+        .filter(item => item.state.status === 'confirmed')
+        .sort((a, b) => (b.state.confirmedAt || 0) - (a.state.confirmedAt || 0))
         .slice(0, CONFIRMED_DISPLAY_LIMIT);
       const displayRows = [...queueRows, ...confirmedRows];
       if (!displayRows.length) {
@@ -481,10 +490,9 @@
         renderSummary();
         return;
       }
-      body.innerHTML = displayRows.map(row => {
+      body.innerHTML = displayRows.map(({ row, state }) => {
         const objkt = row.objktItems[0] || null;
         const p2fk = row.p2fkItems[0] || null;
-        const state = row.syncState || {};
         const statusPills = [];
         if (state.status === 'queued') statusPills.push('<span class="pill warn">Queued (waiting)</span>');
         if (state.status === 'syncing') statusPills.push('<span class="pill warn">Syncing</span>');
