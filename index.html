@@ -364,7 +364,7 @@
       syncTimer: null,
       syncBusy: false,
       lastBroadcastTxid: '',
-      nextDiffQueryAt: 0,
+      nextDiffQueryAt: null,
       diffQueryRunning: false,
       sizeCache: new Map(),
       syncStateByCid: new Map(),
@@ -1504,7 +1504,7 @@
         S.objktItems = objktItems.filter(item => item.cid);
         buildComparisonRows();
         const queued = queueUnmatched();
-        S.nextDiffQueryAt = queued ? 0 : Date.now() + DIFF_RECHECK_MS;
+        S.nextDiffQueryAt = queued ? null : Date.now() + DIFF_RECHECK_MS;
         if (queued) appendLog(`Found ${queued} item(s) waiting to sync from fresh difference query.`, 'good');
         else appendLog('No new objkt differences found. Next difference query in 1 hour.', 'warn');
         return queued;
@@ -1516,7 +1516,7 @@
     async function processAutoSync() {
       if (!S.syncRunning || S.syncBusy) return;
       if (!S.syncQueue.length) {
-        if (!S.nextDiffQueryAt) {
+        if (S.nextDiffQueryAt == null) {
           S.nextDiffQueryAt = Date.now() + DIFF_RECHECK_MS;
           appendLog('Queue is empty. Waiting 1 hour before the next difference query.', 'warn');
         }
@@ -1571,7 +1571,7 @@
       const count = queueUnmatched();
       if (S.syncTimer) clearInterval(S.syncTimer);
       S.syncRunning = true;
-      S.nextDiffQueryAt = 0;
+      S.nextDiffQueryAt = null;
       S.syncTimer = setInterval(processAutoSync, AUTO_SYNC_TICK_MS);
       appendLog(`Auto sync started with ${count} queued unmatched CID(s). It syncs one-by-one after confirmations and reruns the difference query every hour when the queue is empty.`, 'good');
       setStatus('analysisStatus', `Auto sync started with ${count} queued unmatched CID(s).`, 'good');
@@ -1582,7 +1582,7 @@
       S.syncRunning = false;
       if (S.syncTimer) clearInterval(S.syncTimer);
       S.syncTimer = null;
-      S.nextDiffQueryAt = 0;
+      S.nextDiffQueryAt = null;
       appendLog('Auto sync stopped.');
       setStatus('analysisStatus', 'Auto sync stopped.', 'warn');
     }
