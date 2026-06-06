@@ -335,7 +335,21 @@
     const MAX_IPFS_BYTES = 100 * 1024 * 1024;
     const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
     const DELIMITERS = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
-    const CID_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/i;
+    const CIDV0_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
+    const CIDV1_RE = /^b[a-z2-7]+$/;
+    const CID_DAG_PB_CODEC = 0x70;
+    const CID_SHA256_CODE = 0x12;
+    const CID_SHA256_LEN = 0x20;
+    const CIDV0_MULTIHASH_LEN = 34;
+    const MAX_VARINT_SHIFT = 35;
+    const CIDV1_MIN_LEN = 30;
+    const CIDV1_MAX_LEN = 120;
+    const CID_TOKEN_RE = /(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{30,120})/g;
+    const BASE32_MAP = (() => {
+      const map = {};
+      'abcdefghijklmnopqrstuvwxyz234567'.split('').forEach((ch, i) => { map[ch] = i; });
+      return map;
+    })();
     const IPFS_PATH_RE = /^\/?ipfs\/([a-zA-Z0-9]+)(?:\/(.*))?$/i;
     const UNSAFE_RE = /[^a-zA-Z0-9._-]/g;
     const ADDR_RE = /^[mn][1-9A-HJ-NP-Za-km-z]{25,34}$/;
@@ -595,23 +609,95 @@
       return `${clean}/${fallback}`;
     }
 
+    function decodeVarint(bytes, start = 0) {
+      let result = 0;
+      let shift = 0;
+      let i = start;
+      while (i < bytes.length) {
+        const byte = bytes[i];
+        result |= (byte & 0x7f) << shift;
+        i += 1;
+        if ((byte & 0x80) === 0) return { value: result, next: i };
+        shift += 7;
+        if (shift > MAX_VARINT_SHIFT) return null;
+      }
+      return null;
+    }
+
+    function decodeBase32Cid(str) {
+      const clean = norm(str).toLowerCase();
+      if (!/^[a-z2-7]+$/.test(clean)) return null;
+      const out = [];
+      let buffer = 0;
+      let bits = 0;
+      for (const ch of clean) {
+        buffer = (buffer << 5) | BASE32_MAP[ch];
+        bits += 5;
+        while (bits >= 8) {
+          bits -= 8;
+          out.push((buffer >> bits) & 0xff);
+        }
+        buffer &= (1 << bits) - 1;
+      }
+      return new Uint8Array(out);
+    }
+
+    function toCidV0(input) {
+      const raw = norm(input);
+      if (!raw) return '';
+      if (CIDV0_RE.test(raw)) return raw;
+      if (!CIDV1_RE.test(raw) || raw.length < CIDV1_MIN_LEN || raw.length > CIDV1_MAX_LEN) return '';
+      const bytes = decodeBase32Cid(raw.slice(1));
+      if (!bytes?.length) return '';
+      const version = decodeVarint(bytes, 0);
+      if (!version || version.value !== 1) return '';
+      const codec = decodeVarint(bytes, version.next);
+      if (!codec || codec.value !== CID_DAG_PB_CODEC) return '';
+      const multihash = bytes.slice(codec.next);
+      if (multihash.length !== CIDV0_MULTIHASH_LEN || multihash[0] !== CID_SHA256_CODE || multihash[1] !== CID_SHA256_LEN) return '';
+      return encB58(multihash);
+    }
+
+    function findCidMatches(input) {
+      const text = String(input ?? '');
+      const matches = [];
+      for (const item of text.matchAll(CID_TOKEN_RE)) {
+        const raw = item[1] || '';
+        const cid = toCidV0(raw);
+        if (!cid) continue;
+        const index = Number(item.index ?? -1);
+        matches.push({ raw, cid, index, end: index >= 0 ? index + raw.length : -1 });
+      }
+      return matches;
+    }
+
     function extractIpfsParts(v) {
       const input = norm(v);
       if (!input) return null;
       if (/^ipfs:/i.test(input)) {
         const body = input.replace(/^ipfs:/i, '').replace(/^\/+/, '');
         const [first, ...parts] = body.split(/[\\/]+/).filter(Boolean);
-        const cid = norm(first || '');
-        return CID_RE.test(cid) ? { cid, path: parts.join('/') } : null;
+        const cid = toCidV0(first || '');
+        return cid ? { cid, path: parts.join('/') } : null;
       }
-      const loose = input.match(/(Qm[1-9A-HJ-NP-Za-km-z]{44})(?:[\\/]+([^<>\s]+))?/i);
-      if (loose) return { cid: loose[1], path: norm(loose[2] || '') };
+      const loose = findCidMatches(input)[0];
+      if (loose) {
+        const trailing = input.slice(loose.end);
+        const trailingPath = trailing.match(/^[\\/]+([^<>\s]+)$/);
+        return { cid: loose.cid, path: norm(trailingPath?.[1] || '') };
+      }
       try {
         const u = new URL(input);
         const hostSplit = norm(u.hostname).split('.ipfs.');
-        if (hostSplit.length > 1 && CID_RE.test(hostSplit[0])) return { cid: hostSplit[0], path: norm(u.pathname).replace(/^\/+/, '') };
+        if (hostSplit.length > 1) {
+          const hostCid = toCidV0(hostSplit[0] || '');
+          if (hostCid) return { cid: hostCid, path: norm(u.pathname).replace(/^\/+/, '') };
+        }
         const pathMatch = norm(u.pathname).match(IPFS_PATH_RE);
-        if (pathMatch && CID_RE.test(pathMatch[1])) return { cid: pathMatch[1], path: norm(pathMatch[2] || '') };
+        if (pathMatch) {
+          const pathCid = toCidV0(pathMatch[1] || '');
+          if (pathCid) return { cid: pathCid, path: norm(pathMatch[2] || '') };
+        }
       } catch {}
       return null;
     }
@@ -631,11 +717,7 @@
     }
 
     function extractCidsFromText(input) {
-      const found = [];
-      const text = String(input ?? '');
-      const matches = text.match(/\b(Qm[1-9A-HJ-NP-Za-km-z]{44})\b/ig) || [];
-      matches.forEach(cid => { if (CID_RE.test(cid)) found.push(cid); });
-      return unique(found);
+      return unique(findCidMatches(input).map(item => item.cid));
     }
 
     function collectStringValues(value, out, depth = 0) {
