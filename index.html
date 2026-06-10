@@ -1151,7 +1151,7 @@
       return addrs;
     }
     async function buildMsgOutputs({ text, attachments = [], extras = [], fromAddr }) {
-      const safe = sanitize(text);
+      const safe = sanitize(text).replace(/View on objkt:\n(https?:\/\/[^\s]+)/gi, 'View on objkt:\n<<$1>>');
       const delim = randDelim();
       const payload = `${safe}${attachments.map(a => `<<${a}>>`).join('')}<<${randSalt()}>>`;
       const unsObj = `${delim}${utf8len(payload)}${delim}${payload}`;
@@ -1549,7 +1549,7 @@
       if (objkt?.name) bits.push(objkt.name);
       if (objkt?.description) bits.push(objkt.description);
       if (objkt?.mintedDate) bits.push(`Minted date: ${objkt.mintedDate}`);
-      if (objkt?.tokenUrl) bits.push(`View on objkt: <<${objkt.tokenUrl}>>`);
+      if (objkt?.tokenUrl) bits.push(`View on objkt:\n${objkt.tokenUrl}`);
       bits.push(`#${S.keyword}`);
       getExtraKeywords().forEach(tag => bits.push(`#${tag}`));
       return bits.filter(Boolean).join('\n\n');
