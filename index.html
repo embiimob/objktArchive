@@ -231,6 +231,8 @@
         <div class="btn-row">
           <button id="unlockBtn" class="primary">Unlock wallet</button>
           <button id="refreshWalletBtn">Refresh balances</button>
+          <button id="consolidateChangeBtn">Consolidate change</button>
+          <button id="consolidateForMessagingBtn">Consolidate for messaging</button>
           <button id="clearWalletBtn" class="bad">Clear wallet</button>
         </div>
         <div id="walletStatus" class="status">Wallet is locked.</div>
@@ -329,7 +331,6 @@
     const DUST = 546;
     const FEE_DEFAULT = 10;
     const FEE_MIN = 2;
-    const CHANGE_COUNT = 2;
     const CHANGE_PREFIX = 'sup:testnet3:change:';
     const AMOUNT_PER = DUST / 1e8;
     const MAX_IPFS_BYTES = 100 * 1024 * 1024;
@@ -808,10 +809,18 @@
       const payload = await res.json();
       const cs = payload?.chain_stats || {};
       const ms = payload?.mempool_stats || {};
+
+      const confirmedAvailable = (Number(cs.funded_txo_sum || 0) - Number(cs.spent_txo_sum || 0)) - Number(ms.spent_txo_sum || 0);
+      const unconfirmedIncoming = Number(ms.funded_txo_sum || 0);
+      const tx_count = Number(cs.tx_count || 0) + Number(ms.tx_count || 0);
+      const utxo_count = (Number(cs.funded_txo_count || 0) - Number(cs.spent_txo_count || 0)) + (Number(ms.funded_txo_count || 0) - Number(ms.spent_txo_count || 0));
+
       return {
-        confirmed: (Number(cs.funded_txo_sum || 0) - Number(cs.spent_txo_sum || 0)) - Number(ms.spent_txo_sum || 0),
-        unconfirmed: Number(ms.funded_txo_sum || 0),
+        confirmed: confirmedAvailable,
+        unconfirmed: unconfirmedIncoming,
         mempoolSpent: Number(ms.spent_txo_sum || 0),
+        tx_count,
+        utxo_count
       };
     }
 
@@ -970,9 +979,13 @@
     async function buildKeyring(base) {
       const main = await buildSignerEntry(base, 'main');
       const changes = [];
-      for (let i = 0; i < CHANGE_COUNT; i++) {
+      for (let i = 0; i < 200; i++) {
         const d = await deriveChangeKey(base, `slot-${i + 1}`);
-        changes.push(await buildSignerEntry(d, `change-${i + 1}`));
+        const entry = await buildSignerEntry(d, `change-${i + 1}`);
+        const bal = await getBalance(entry.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, tx_count: 0, utxo_count: 0 }));
+        entry.utxoCount = bal.utxo_count;
+        changes.push(entry);
+        if (i >= 1 && bal.tx_count === 0) break;
       }
       return { main, changes, all: [main, ...changes] };
     }
@@ -1027,7 +1040,6 @@
       if (!S.priv) throw new Error('Wallet is locked');
       const kr = S.keyring || await buildKeyring(S.priv);
       if (!S.keyring) S.keyring = kr;
-      const [cA, cB] = kr.changes;
 
       const feeRate = await getCachedFeeRate();
       const estFee = (inputs, outputsCount) => Math.ceil((10 + 148 * inputs + 34 * outputsCount) * feeRate);
@@ -1035,16 +1047,25 @@
       const totalOut = outSats.reduce((s, o) => s + o.sat, 0);
 
       // Fetch change-address balances first; only fetch main if neither change address has any.
-      const [balCA, balCB] = await Promise.all([getBalance(cA.addr), getBalance(cB.addr)]);
-      const totalsByAddr = new Map([
-        [cA.addr, balCA.confirmed],
-        [cB.addr, balCB.confirmed],
-      ]);
+      const totalsByAddr = new Map();
+      const utxoCountByAddr = new Map();
+      let totalChangeConfirmed = 0;
+
+      const balancePromises = kr.changes.map(async sg => {
+        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0 }));
+        totalsByAddr.set(sg.addr, bal.confirmed);
+        utxoCountByAddr.set(sg.addr, bal.utxo_count);
+        sg.utxoCount = bal.utxo_count;
+        totalChangeConfirmed += bal.confirmed;
+      });
+      await Promise.all(balancePromises);
 
       let mainFetched = false;
-      if (balCA.confirmed === 0 && balCB.confirmed === 0) {
-        const balMain = await getBalance(kr.main.addr);
+      if (totalChangeConfirmed === 0) {
+        const balMain = await getBalance(kr.main.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0 }));
         totalsByAddr.set(kr.main.addr, balMain.confirmed);
+        utxoCountByAddr.set(kr.main.addr, balMain.utxo_count);
+        kr.main.utxoCount = balMain.utxo_count;
         mainFetched = true;
       }
 
@@ -1053,7 +1074,7 @@
       }
 
       // Sort candidates by balance descending; main is included only if we fetched it.
-      const changeCandidates = [cA, cB].sort((a, b) => (totalsByAddr.get(b.addr) || 0) - (totalsByAddr.get(a.addr) || 0));
+      const changeCandidates = [...kr.changes].sort((a, b) => (totalsByAddr.get(b.addr) || 0) - (totalsByAddr.get(a.addr) || 0));
       const candidates = mainFetched ? [...changeCandidates, kr.main] : changeCandidates;
 
       let allUtxos = [];
@@ -1066,7 +1087,12 @@
         // Try to fetch UTXOs for this source if its balance might be enough
         // A minimal fee calculation ensures we only fetch if there's a chance
         if (srcBalance >= totalOut + estFee(1, outSats.length + 1)) {
-          const utxos = await fetchSignerUtxos(src);
+          let utxos = [];
+          try {
+            utxos = await fetchSignerUtxos(src);
+          } catch (e) {
+            continue;
+          }
           allUtxos = [...allUtxos, ...utxos];
 
           const pool = utxos.sort((a, b) => b.value - a.value);
@@ -1084,11 +1110,13 @@
       // If no single address covers the amount, try mixing across all addresses with balances.
       if (!selectedUtxos.length) {
         if (!mainFetched) {
-          const balMain = await getBalance(kr.main.addr);
+          const balMain = await getBalance(kr.main.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0 }));
           totalsByAddr.set(kr.main.addr, balMain.confirmed);
           if (balMain.confirmed > 0) {
-            const utxosMain = await fetchSignerUtxos(kr.main);
-            allUtxos = [...allUtxos, ...utxosMain];
+            try {
+              const utxosMain = await fetchSignerUtxos(kr.main);
+              allUtxos = [...allUtxos, ...utxosMain];
+            } catch (e) {}
           }
           mainFetched = true;
         }
@@ -1097,8 +1125,10 @@
         for (const src of changeCandidates) {
           const srcBalance = totalsByAddr.get(src.addr) || 0;
           if (srcBalance > 0 && !allUtxos.some(u => u.srcAddr === src.addr)) {
-            const utxos = await fetchSignerUtxos(src);
-            allUtxos = [...allUtxos, ...utxos];
+            try {
+              const utxos = await fetchSignerUtxos(src);
+              allUtxos = [...allUtxos, ...utxos];
+            } catch (e) {}
           }
         }
 
@@ -1116,13 +1146,34 @@
       const fee = estFee(selectedUtxos.length, outSats.length + 1);
       const change = selectedTotal - totalOut - fee;
       if (change < 0) throw new Error('Insufficient balance after fee');
-      let changeAddr = cA.addr;
-      if (selected) {
-        if (selected.addr === cA.addr) changeAddr = cB.addr;
-        else if (selected.addr === cB.addr) changeAddr = cA.addr;
-        else changeAddr = S.lastChangeOutputAddr === cA.addr ? cB.addr : cA.addr;
-      } else {
-        changeAddr = S.lastChangeOutputAddr === cA.addr ? cB.addr : cA.addr;
+
+      let validChanges = kr.changes.filter(c => utxoCountByAddr.get(c.addr) < 420);
+
+      if (validChanges.length === 0) {
+        const nextIdx = kr.changes.length;
+        if (nextIdx < 200) {
+          const d = await deriveChangeKey(kr.main.pb, `slot-${nextIdx + 1}`);
+          const newChange = await buildSignerEntry(d, `change-${nextIdx + 1}`);
+          newChange.utxoCount = 0;
+          kr.changes.push(newChange);
+          kr.all.push(newChange);
+          validChanges.push(newChange);
+        } else {
+          throw new Error('All 200 change addresses have >= 420 UTXOs. Cannot create more change outputs.');
+        }
+      }
+
+      let changeAddr = validChanges[0].addr;
+      if (validChanges.length > 1) {
+        const lastIdx = validChanges.findIndex(c => c.addr === S.lastChangeOutputAddr);
+        if (lastIdx >= 0) {
+          changeAddr = validChanges[(lastIdx + 1) % validChanges.length].addr;
+        } else if (selected) {
+          const selIdx = validChanges.findIndex(c => c.addr === selected.addr);
+          if (selIdx >= 0) {
+            changeAddr = validChanges[(selIdx + 1) % validChanges.length].addr;
+          }
+        }
       }
       S.lastChangeOutputAddr = changeAddr;
       const finalOuts = [...outSats];
@@ -1131,6 +1182,118 @@
       const res = await fetch(`${getMempoolApi()}/tx`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: rawHex });
       if (!res.ok) throw new Error(`Broadcast failed: ${await res.text()}`);
       return (await res.text()).trim();
+    }
+
+    async function consolidateForMessagingFunds() {
+      if (!S.priv) throw new Error('Unlock wallet first');
+      const kr = S.keyring || await buildKeyring(S.priv);
+      if (!S.keyring) S.keyring = kr;
+
+      const allUtxos = [];
+      const validChanges = [];
+
+      await Promise.all(kr.all.map(async sg => {
+        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0 }));
+        if (kr.changes.includes(sg)) {
+          sg.utxoCount = bal.utxo_count;
+          if (sg.utxoCount < 420) {
+            validChanges.push(sg);
+          }
+        }
+        if (bal.confirmed <= 0) return;
+        try {
+          const utxos = await fetchSignerUtxos(sg);
+          allUtxos.push(...utxos);
+        } catch (e) {}
+      }));
+
+      if (!allUtxos.length) throw new Error('No confirmed funds to consolidate');
+
+      if (validChanges.length === 0) {
+        const nextIdx = kr.changes.length;
+        if (nextIdx < 200) {
+          const d = await deriveChangeKey(kr.main.pb, `slot-${nextIdx + 1}`);
+          const newChange = await buildSignerEntry(d, `change-${nextIdx + 1}`);
+          newChange.utxoCount = 0;
+          kr.changes.push(newChange);
+          kr.all.push(newChange);
+          validChanges.push(newChange);
+        } else {
+          throw new Error('No valid change addresses to consolidate to');
+        }
+      }
+
+      validChanges.sort((a, b) => a.utxoCount - b.utxoCount);
+      const targetChange = validChanges[0];
+
+      const feeRate = await getCachedFeeRate();
+      const fee = Math.ceil((10 + 148 * allUtxos.length + 34) * feeRate);
+      const total = allUtxos.reduce((s, u) => s + Number(u.value || 0), 0);
+      const send = total - fee;
+      if (send < DUST) throw new Error(`Consolidation output too small after fee (${send} sat)`);
+
+      const rawHex = await buildTx(allUtxos, [{ addr: targetChange.addr, sat: send }]);
+      const res = await fetch(`${getMempoolApi()}/tx`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: rawHex });
+      if (!res.ok) throw new Error(`Consolidation broadcast failed: ${await res.text()}`);
+      return (await res.text()).trim();
+    }
+
+    async function consolidateChangeFunds() {
+      if (!S.priv) throw new Error('Unlock wallet first');
+      const kr = S.keyring || await buildKeyring(S.priv);
+      if (!S.keyring) S.keyring = kr;
+
+      const changeSigners = kr.changes;
+      const utxoGroups = await Promise.all(changeSigners.map(async sg => {
+        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0 }));
+        if (bal.confirmed <= 0) return [];
+        try {
+          return await fetchSignerUtxos(sg);
+        } catch (e) {
+          return [];
+        }
+      }));
+      const utxos = utxoGroups.flat();
+      if (!utxos.length) throw new Error('No confirmed change funds to consolidate');
+
+      const feeRate = await getCachedFeeRate();
+      const fee = Math.ceil((10 + 148 * utxos.length + 34) * feeRate);
+      const total = utxos.reduce((s, u) => s + Number(u.value || 0), 0);
+      const send = total - fee;
+      if (send < DUST) throw new Error(`Consolidation output too small after fee (${send} sat)`);
+
+      const rawHex = await buildTx(utxos, [{ addr: kr.main.addr, sat: send }]);
+      const res = await fetch(`${getMempoolApi()}/tx`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: rawHex });
+      if (!res.ok) throw new Error(`Consolidation broadcast failed: ${await res.text()}`);
+      return (await res.text()).trim();
+    }
+
+    async function consolidateChange() {
+      appendLog('Consolidating change funds...', 'info');
+      setStatus('walletStatus', 'Consolidating change funds...', 'warn');
+      try {
+        const txid = await consolidateChangeFunds();
+        appendLog(`Consolidated change funds. txid: ${txid}`, 'good');
+        setStatus('walletStatus', `Consolidated change funds. txid: ${txid}`, 'good');
+        refreshWalletBalances();
+      } catch (e) {
+        appendLog(`Consolidation failed: ${e.message}`, 'bad');
+        setStatus('walletStatus', e.message || 'Consolidation failed', 'bad');
+      }
+    }
+
+    async function consolidateForMessaging() {
+      appendLog('Consolidating for messaging...', 'info');
+      setStatus('walletStatus', 'Consolidating for messaging...', 'warn');
+      try {
+        const txid = await consolidateForMessagingFunds();
+        appendLog(`Consolidated for messaging. txid: ${txid}`, 'good');
+        setStatus('walletStatus', `Consolidated for messaging. txid: ${txid}`, 'good');
+        refreshWalletBalances();
+      } catch (e) {
+        appendLog(`Consolidation failed: ${e.message}`, 'bad');
+        setStatus('walletStatus', e.message || 'Consolidation failed', 'bad');
+      }
     }
 
     function randDelim() { const b = new Uint8Array(1), lim = Math.floor(256 / DELIMITERS.length) * DELIMITERS.length; let v = 0; do { crypto.getRandomValues(b); v = b[0]; } while (v >= lim); return DELIMITERS[v % DELIMITERS.length]; }
@@ -1753,6 +1916,8 @@
 
     $('unlockBtn').addEventListener('click', () => unlockWallet().catch(() => {}));
     $('refreshWalletBtn').addEventListener('click', () => refreshWalletBalances().catch(err => setStatus('walletStatus', err.message || 'Balance refresh failed.', 'bad')));
+    $('consolidateChangeBtn').addEventListener('click', () => consolidateChange());
+    $('consolidateForMessagingBtn').addEventListener('click', () => consolidateForMessaging());
     $('clearWalletBtn').addEventListener('click', clearWallet);
     $('analyzeBtn').addEventListener('click', analyze);
     $('startSyncBtn').addEventListener('click', startAutoSync);
