@@ -283,8 +283,24 @@
           <button id="analyzeBtn" class="primary">Analyze keyword vs objkt</button>
           <button id="startSyncBtn" class="good">Start auto sync unmatched</button>
           <button id="stopSyncBtn" class="warn">Stop auto sync</button>
+          <button id="exportCsvBtn">Export CSV archive</button>
         </div>
         <div id="analysisStatus" class="status">Enter a keyword and objkt user, then analyze.</div>
+      </section>
+
+
+      <section class="card span-12">
+        <h2>Single Item Re-add</h2>
+        <div class="field-row">
+          <div class="field">
+            <label for="singleObjktUrlInput">objkt.com Item URL</label>
+            <input id="singleObjktUrlInput" placeholder="https://objkt.com/tokens/KT1.../123" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="singleSyncBtn" class="primary">Re-add to Relay</button>
+        </div>
+        <div id="singleSyncStatus" class="status">Enter an objkt.com URL to extract its IPFS hash and re-add to relay.</div>
       </section>
 
       <section class="card span-12">
@@ -1895,6 +1911,133 @@
       setStatus('analysisStatus', 'Auto sync stopped.', 'warn');
     }
 
+
+
+    async function reAddSingleItem() {
+      const url = norm($('singleObjktUrlInput').value);
+      if (!url) {
+        setStatus('singleSyncStatus', 'Enter an objkt.com URL.', 'bad');
+        return;
+      }
+
+      const match = url.match(/(?:\/tokens\/|https?:\/\/objkt\.com\/tokens\/)([^\/]+)\/([^/?#]+)/);
+      if (!match) {
+        setStatus('singleSyncStatus', 'Invalid objkt.com URL format. Expected something like https://objkt.com/tokens/contract/token_id', 'bad');
+        return;
+      }
+      const contract = match[1];
+      const tokenId = match[2];
+
+      setStatus('singleSyncStatus', `Fetching metadata for ${contract} / ${tokenId}...`, 'warn');
+      appendLog(`Fetching single item metadata for ${url}...`);
+
+      try {
+        const query = `
+          query SingleToken($contract: String!, $tokenId: String!) {
+            token(where: { fa_contract: { _eq: $contract }, token_id: { _eq: $tokenId } }) {
+              token_id
+              fa_contract
+              name
+              description
+              artifact_uri
+              display_uri
+              thumbnail_uri
+              mime
+              supply
+              metadata
+              timestamp
+              creators { holder { alias address } }
+            }
+          }
+        `;
+
+        const data = await fetchObjktGraphQL(query, { contract, tokenId });
+        const token = data?.token?.[0];
+        if (!token) throw new Error('Token not found or invalid.');
+
+        const normalizedItem = normalizeObjktItem({ source: 'manual', token }, { address: 'manual', alias: 'manual' });
+
+        if (!normalizedItem.cid) {
+           throw new Error('No IPFS CID found in the token metadata.');
+        }
+
+        appendLog(`Found IPFS Hash: ${normalizedItem.cid} for ${url}`, 'info');
+
+        if (!S.keyring) {
+           setStatus('singleSyncStatus', 'Wallet must be unlocked to re-add to relay.', 'bad');
+           return;
+        }
+
+        setStatus('singleSyncStatus', `Found IPFS Hash: ${normalizedItem.cid}. Broadcasting to relay...`, 'warn');
+
+        const row = { cid: normalizedItem.cid, objktItems: [normalizedItem], hasObjkt: true };
+        const attach = await normalizeAttach(normalizedItem.urn || normalizedItem.artifactUri || normalizedItem.displayUri || `IPFS:${normalizedItem.cid}`, { mime: normalizedItem.mime || '' });
+
+        const outputs = await buildMsgOutputs({
+          text: buildSyncText(row),
+          attachments: [attach.canonical],
+          extras: [],
+          fromAddr: S.addr,
+        });
+
+        appendLog(`Broadcasting sync tx for ${normalizedItem.cid}...`);
+        const txid = await broadcastTx(outputs);
+        S.lastBroadcastTxid = txid;
+
+        setStatus('singleSyncStatus', `Successfully re-added ${normalizedItem.cid} to relay. txid: ${txid}`, 'good');
+        appendLog(`Broadcasted ${normalizedItem.cid} in tx ${txid}.`, 'good');
+
+      } catch (e) {
+         setStatus('singleSyncStatus', `Error: ${e.message}`, 'bad');
+         appendLog(`Single item error: ${e.message}`, 'bad');
+      }
+    }
+
+    function exportArchiveCSV() {
+      const rows = (S.comparisonRows || []).filter(r => r.hasP2fk);
+      if (rows.length === 0) {
+        appendLog('No items in the keyword archive to export.', 'warn');
+        return;
+      }
+
+      const escapeCsv = (str) => {
+        if (str == null) return '""';
+        const s = String(str);
+        if (s.includes('"') || s.includes(',') || s.includes('\n')) {
+          return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+      };
+
+      const headers = ['Title', 'Objkt URL', 'Objkt Source URL', 'IPFS Gateway URL', 'Sup!? URN', 'CID'];
+      const csvLines = [headers.map(escapeCsv).join(',')];
+
+      for (const row of rows) {
+        const objkt = row.objktItems[0] || {};
+        const title = objkt.name || '';
+        const objktUrl = objkt.tokenUrl || '';
+        const sourceUrl = objkt.artifactUri || objkt.displayUri || '';
+        const gatewayUrl = `${getGatewayBase()}${row.cid}`;
+        const urn = row.urn || '';
+        const cid = row.cid || '';
+
+        csvLines.push([title, objktUrl, sourceUrl, gatewayUrl, urn, cid].map(escapeCsv).join(','));
+      }
+
+      const csvContent = csvLines.join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.setAttribute('download', `objktArchive_${S.keyword || 'export'}.csv`);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      appendLog(`Exported ${rows.length} items to CSV.`, 'good');
+    }
+
     async function refreshConfirmationStates() {
       const broadcasted = (S.comparisonRows || []).filter(row => getSyncState(row.cid).status === 'broadcasted');
       if (!broadcasted.length) return;
@@ -1922,6 +2065,8 @@
     $('analyzeBtn').addEventListener('click', analyze);
     $('startSyncBtn').addEventListener('click', startAutoSync);
     $('stopSyncBtn').addEventListener('click', stopAutoSync);
+    $('exportCsvBtn').addEventListener('click', exportArchiveCSV);
+    $('singleSyncBtn').addEventListener('click', () => reAddSingleItem().catch(() => {}));
 
     setInterval(refreshConfirmationStates, 60000);
     renderWalletInfo([]);
