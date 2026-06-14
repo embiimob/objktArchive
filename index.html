@@ -288,27 +288,7 @@
         <div id="analysisStatus" class="status">Enter a keyword and objkt user, then analyze.</div>
       </section>
 
-
-      <section class="card span-12">
-        <h2>Single Item Re-add</h2>
-        <div class="field-row">
-          <div class="field">
-            <label for="singleObjktUrlInput">objkt.com Item URL</label>
-            <input id="singleObjktUrlInput" placeholder="https://objkt.com/tokens/KT1.../123" autocomplete="off" spellcheck="false">
-          </div>
-        </div>
-        <div class="btn-row">
-          <button id="singleSyncBtn" class="primary">Re-add to Relay</button>
-        </div>
-        <div id="singleSyncStatus" class="status">Enter an objkt.com URL to extract its IPFS hash and re-add to relay.</div>
-      </section>
-
-      <section class="card span-12">
-        <h2>Summary</h2>
-        <div id="summaryGrid" class="summary-grid"></div>
-      </section>
-
-      <section class="card span-12">
+<section class="card span-12">
         <h2>Comparison</h2>
         <div class="table-wrap">
           <table>
@@ -329,7 +309,29 @@
         </div>
       </section>
 
-      <section class="card span-12">
+
+
+
+            <section class="card span-12">
+        <h2>Summary</h2>
+        <div id="summaryGrid" class="summary-grid"></div>
+      </section>
+
+            <section class="card span-12">
+        <h2>Single Item Re-add</h2>
+        <div class="field-row">
+          <div class="field">
+            <label for="singleObjktUrlInput">objkt.com Item URL</label>
+            <input id="singleObjktUrlInput" placeholder="https://objkt.com/tokens/KT1.../123" autocomplete="off" spellcheck="false">
+          </div>
+        </div>
+        <div class="btn-row">
+          <button id="singleSyncBtn" class="primary">Re-add to Relay</button>
+        </div>
+        <div id="singleSyncStatus" class="status">Enter an objkt.com URL to extract its IPFS hash and re-add to relay.</div>
+      </section>
+
+<section class="card span-12">
         <h2>Activity log</h2>
         <div id="log" class="log"></div>
       </section>
@@ -2014,7 +2016,13 @@
 
       for (const row of rows) {
         const objkt = row.objktItems[0] || {};
-        const title = objkt.name || '';
+
+        let title = objkt.name || '';
+        // Sanitize title to prevent CSV corruption and formula injection
+        title = title.replace(/[\r\n]+/g, ' ').trim();
+        if (/^[=+\-@]/.test(title)) {
+          title = "'" + title;
+        }
         const objktUrl = objkt.tokenUrl || '';
         const sourceUrl = objkt.artifactUri || objkt.displayUri || '';
         const gatewayUrl = `${getGatewayBase()}${row.cid}`;
