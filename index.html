@@ -317,18 +317,51 @@
         <div id="summaryGrid" class="summary-grid"></div>
       </section>
 
-            <section class="card span-12">
-        <h2>Single Item Re-add</h2>
+            <section class="card span-12" id="singleItemPanel">
+        <h2>Single Item / Failed Re-add</h2>
         <div class="field-row">
           <div class="field">
-            <label for="singleObjktUrlInput">objkt.com Item URL</label>
-            <input id="singleObjktUrlInput" placeholder="https://objkt.com/tokens/KT1.../123" autocomplete="off" spellcheck="false">
+            <label for="singleObjktUrlInput">objkt.com Item URL or CID</label>
+            <input id="singleObjktUrlInput" placeholder="https://objkt.com/tokens/KT1.../123 or CID" autocomplete="off" spellcheck="false">
+          </div>
+          <button id="singleAnalyzeBtn" class="secondary" style="margin-top: 24px;">Analyze</button>
+        </div>
+
+        <div id="singleItemFields" style="display: none; margin-top: 15px;">
+          <div class="field-row">
+            <div class="field">
+              <label for="singleMainKeywordInput">Main #Keyword</label>
+              <input id="singleMainKeywordInput" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="singleTitleInput">Title</label>
+              <input id="singleTitleInput" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="singleArtistInput">Artist Name</label>
+              <input id="singleArtistInput" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="field">
+              <label for="singleUrnInput">Open IPFS URN</label>
+              <input id="singleUrnInput" placeholder="IPFS:CID/filename.jpg" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+          <div class="field">
+            <label for="singleDescInput">Description</label>
+            <textarea id="singleDescInput" rows="3" autocomplete="off" spellcheck="false"></textarea>
+          </div>
+          <div class="field">
+            <label for="singleExtraKeywordsInput">Extra #Keywords (comma separated)</label>
+            <input id="singleExtraKeywordsInput" autocomplete="off" spellcheck="false">
           </div>
         </div>
-        <div class="btn-row">
-          <button id="singleSyncBtn" class="primary">Re-add to Relay</button>
+
+        <div class="btn-row" style="margin-top: 15px;">
+          <button id="singleSyncBtn" class="primary">Re-add / Sync item</button>
         </div>
-        <div id="singleSyncStatus" class="status">Enter an objkt.com URL to extract its IPFS hash and re-add to relay.</div>
+        <div id="singleSyncStatus" class="status">Enter an objkt.com URL to extract its IPFS hash, or use Analyze to edit before syncing.</div>
       </section>
 
 <section class="card span-12">
@@ -568,6 +601,7 @@
               <div class="btn-row">
                 <button class="small-btn" data-sync-cid="${esc(row.cid)}" ${(!row.hasObjkt || row.hasP2fk) ? 'disabled' : ''}>Sync one</button>
                 <button class="small-btn" data-open-cid="${esc(row.cid)}" ${!objkt?.tokenUrl ? 'disabled' : ''}>Open objkt</button>
+                ${state.status === 'error' ? `<button class="small-btn" data-edit-cid="${esc(row.cid)}">Manual Edit & Sync</button>` : ''}
               </div>
             </td>
           </tr>`;
@@ -577,6 +611,15 @@
         const row = (S.comparisonRows || []).find(item => item.cid === btn.dataset.openCid);
         const url = row?.objktItems?.[0]?.tokenUrl;
         if (url) window.open(url, '_blank', 'noopener,noreferrer');
+      }));
+      body.querySelectorAll('[data-edit-cid]').forEach(btn => btn.addEventListener('click', () => {
+        const row = (S.comparisonRows || []).find(item => item.cid === btn.dataset.editCid);
+        if (row) {
+          const url = row.objktItems?.[0]?.tokenUrl || row.cid;
+          $('singleObjktUrlInput').value = url;
+          $('singleItemPanel').scrollIntoView({ behavior: 'smooth' });
+          analyzeSingleItem();
+        }
       }));
       renderSummary();
     }
@@ -1915,80 +1958,148 @@
 
 
 
+    async function analyzeSingleItem() {
+      let url = norm($('singleObjktUrlInput').value);
+      if (!url) {
+        setStatus('singleSyncStatus', 'Enter an objkt.com URL or CID.', 'bad');
+        return;
+      }
+
+      url = url.replace(/\\/g, '/');
+      $('singleObjktUrlInput').value = url;
+
+      let normalizedItem = null;
+
+      const match = url.match(/(?:\/tokens\/|https?:\/\/objkt\.com\/tokens\/)([^\/]+)\/([^/?#]+)/);
+      if (match) {
+        const contract = match[1];
+        const tokenId = match[2];
+
+        setStatus('singleSyncStatus', `Fetching metadata for ${contract} / ${tokenId}...`, 'warn');
+        appendLog(`Fetching single item metadata for ${url}...`);
+
+        try {
+          const query = `
+            query SingleToken($contract: String!, $tokenId: String!) {
+              token(where: { fa_contract: { _eq: $contract }, token_id: { _eq: $tokenId } }) {
+                token_id
+                fa_contract
+                name
+                description
+                artifact_uri
+                display_uri
+                thumbnail_uri
+                mime
+                supply
+                metadata
+                timestamp
+                creators { holder { alias address } }
+              }
+            }
+          `;
+
+          const data = await fetchObjktGraphQL(query, { contract, tokenId });
+          const token = data?.token?.[0];
+          if (!token) throw new Error('Token not found or invalid.');
+
+          normalizedItem = normalizeObjktItem({ source: 'manual', token }, { address: 'manual', alias: 'manual' });
+        } catch (e) {
+          setStatus('singleSyncStatus', `Error fetching from objkt: ${e.message}`, 'bad');
+          return;
+        }
+      } else {
+        // Assume it's a CID or URN
+        let cidMatch = url.match(CID_TOKEN_RE);
+        if (cidMatch) {
+          normalizedItem = { cid: cidMatch[0], urn: `IPFS:${cidMatch[0]}` };
+        } else {
+          setStatus('singleSyncStatus', 'Could not parse URL or CID.', 'bad');
+          return;
+        }
+      }
+
+      $('singleItemFields').style.display = 'block';
+      $('singleMainKeywordInput').value = sanitize($('keywordInput').value) || '';
+      $('singleTitleInput').value = normalizedItem?.name || '';
+      $('singleArtistInput').value = normalizedItem?.artistAlias || '';
+      $('singleDescInput').value = normalizedItem?.description || '';
+      let urn = normalizedItem?.urn || normalizedItem?.artifactUri || normalizedItem?.displayUri || (normalizedItem?.cid ? `IPFS:${normalizedItem.cid}` : '');
+      if (urn.toLowerCase().startsWith('ipfs://')) urn = 'IPFS:' + urn.substring(7);
+      urn = urn.replace(/\\/g, '/');
+      $('singleUrnInput').value = urn;
+      $('singleExtraKeywordsInput').value = $('extraKeywordsInput').value || '';
+
+      setStatus('singleSyncStatus', 'Item analyzed. You can edit the fields before syncing.', 'good');
+    }
+
     async function reAddSingleItem() {
       const url = norm($('singleObjktUrlInput').value);
       if (!url) {
-        setStatus('singleSyncStatus', 'Enter an objkt.com URL.', 'bad');
+        setStatus('singleSyncStatus', 'Enter an objkt.com URL or CID and analyze first.', 'bad');
         return;
       }
 
-      const match = url.match(/(?:\/tokens\/|https?:\/\/objkt\.com\/tokens\/)([^\/]+)\/([^/?#]+)/);
-      if (!match) {
-        setStatus('singleSyncStatus', 'Invalid objkt.com URL format. Expected something like https://objkt.com/tokens/contract/token_id', 'bad');
+      if ($('singleItemFields').style.display !== 'block') {
+         setStatus('singleSyncStatus', 'Please click Analyze first.', 'bad');
+         return;
+      }
+
+      if (!S.keyring) {
+        setStatus('singleSyncStatus', 'Wallet locked, skipped relay broadcast.', 'bad');
         return;
       }
-      const contract = match[1];
-      const tokenId = match[2];
 
-      setStatus('singleSyncStatus', `Fetching metadata for ${contract} / ${tokenId}...`, 'warn');
-      appendLog(`Fetching single item metadata for ${url}...`);
+      setStatus('singleSyncStatus', `Broadcasting to relay...`, 'warn');
 
       try {
-        const query = `
-          query SingleToken($contract: String!, $tokenId: String!) {
-            token(where: { fa_contract: { _eq: $contract }, token_id: { _eq: $tokenId } }) {
-              token_id
-              fa_contract
-              name
-              description
-              artifact_uri
-              display_uri
-              thumbnail_uri
-              mime
-              supply
-              metadata
-              timestamp
-              creators { holder { alias address } }
-            }
-          }
-        `;
+        const title = norm($('singleTitleInput').value);
+        const artist = norm($('singleArtistInput').value);
+        const desc = norm($('singleDescInput').value);
+        let urn = norm($('singleUrnInput').value);
+        urn = urn.replace(/\\/g, '/');
 
-        const data = await fetchObjktGraphQL(query, { contract, tokenId });
-        const token = data?.token?.[0];
-        if (!token) throw new Error('Token not found or invalid.');
+        const mainKw = norm($('singleMainKeywordInput').value);
+        const extraKws = norm($('singleExtraKeywordsInput').value).split(/[,\s]+/).map(t => t.replace(/^#+/, '')).filter(Boolean);
 
-        const normalizedItem = normalizeObjktItem({ source: 'manual', token }, { address: 'manual', alias: 'manual' });
+        const bits = [];
+        const prefix = sanitize($('messagePrefixInput').value);
+        if (prefix) bits.push(prefix);
+        if (artist) bits.push(`Artist: ${artist}`);
+        if (title) bits.push(title);
+        if (desc) bits.push(desc);
 
-        if (!normalizedItem.cid) {
-           throw new Error('No IPFS CID found in the token metadata.');
+        // Try to append objkt url if we can reconstruct it from the input
+        const match = url.match(/(?:\/tokens\/|https?:\/\/objkt\.com\/tokens\/)([^\/]+)\/([^/?#]+)/);
+        if (match) {
+           bits.push(`View on objkt:\nhttps://objkt.com/tokens/${match[1]}/${match[2]}`);
         }
 
-        appendLog(`Found IPFS Hash: ${normalizedItem.cid} for ${url}`, 'info');
+        if (mainKw) bits.push(`#${mainKw}`);
+        extraKws.forEach(tag => bits.push(`#${tag}`));
 
+        const text = bits.filter(Boolean).join('\n\n');
 
+        let cid = '';
+        let cidMatch = urn.match(CID_TOKEN_RE);
+        if (cidMatch) {
+            cid = cidMatch[0];
+        }
 
-        if (S.keyring) {
-          setStatus('singleSyncStatus', `Found IPFS Hash: ${normalizedItem.cid}. Broadcasting to relay...`, 'warn');
-
-        const row = { cid: normalizedItem.cid, objktItems: [normalizedItem], hasObjkt: true };
-        const attach = await normalizeAttach(normalizedItem.urn || normalizedItem.artifactUri || normalizedItem.displayUri || `IPFS:${normalizedItem.cid}`, { mime: normalizedItem.mime || '' });
+        const attach = await normalizeAttach(urn, { mime: '' });
 
         const outputs = await buildMsgOutputs({
-          text: buildSyncText(row),
+          text: text,
           attachments: [attach.canonical],
           extras: [],
           fromAddr: S.addr,
         });
 
-        appendLog(`Broadcasting sync tx for ${normalizedItem.cid}...`);
+        appendLog(`Broadcasting sync tx for ${cid}...`);
         const txid = await broadcastTx(outputs);
         S.lastBroadcastTxid = txid;
 
-        setStatus('singleSyncStatus', `Successfully re-added ${normalizedItem.cid} to relay. txid: ${txid}`, 'good');
-        appendLog(`Broadcasted ${normalizedItem.cid} in tx ${txid}.`, 'good');
-        } else {
-          setStatus('singleSyncStatus', `Found IPFS Hash: ${normalizedItem.cid}. (Wallet locked, skipped relay broadcast)`, 'good');
-        }
+        setStatus('singleSyncStatus', `Successfully re-added to relay. txid: ${txid}`, 'good');
+        appendLog(`Broadcasted ${cid} in tx ${txid}.`, 'good');
 
       } catch (e) {
          setStatus('singleSyncStatus', `Error: ${e.message}`, 'bad');
@@ -2075,6 +2186,7 @@
     $('startSyncBtn').addEventListener('click', startAutoSync);
     $('stopSyncBtn').addEventListener('click', stopAutoSync);
     $('exportCsvBtn').addEventListener('click', exportArchiveCSV);
+    $('singleAnalyzeBtn').addEventListener('click', () => analyzeSingleItem().catch(() => {}));
     $('singleSyncBtn').addEventListener('click', () => reAddSingleItem().catch(() => {}));
 
     setInterval(refreshConfirmationStates, 60000);
