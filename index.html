@@ -1965,12 +1965,10 @@
 
         appendLog(`Found IPFS Hash: ${normalizedItem.cid} for ${url}`, 'info');
 
-        if (!S.keyring) {
-           setStatus('singleSyncStatus', 'Wallet must be unlocked to re-add to relay.', 'bad');
-           return;
-        }
 
-        setStatus('singleSyncStatus', `Found IPFS Hash: ${normalizedItem.cid}. Broadcasting to relay...`, 'warn');
+
+        if (S.keyring) {
+          setStatus('singleSyncStatus', `Found IPFS Hash: ${normalizedItem.cid}. Broadcasting to relay...`, 'warn');
 
         const row = { cid: normalizedItem.cid, objktItems: [normalizedItem], hasObjkt: true };
         const attach = await normalizeAttach(normalizedItem.urn || normalizedItem.artifactUri || normalizedItem.displayUri || `IPFS:${normalizedItem.cid}`, { mime: normalizedItem.mime || '' });
@@ -1988,6 +1986,9 @@
 
         setStatus('singleSyncStatus', `Successfully re-added ${normalizedItem.cid} to relay. txid: ${txid}`, 'good');
         appendLog(`Broadcasted ${normalizedItem.cid} in tx ${txid}.`, 'good');
+        } else {
+          setStatus('singleSyncStatus', `Found IPFS Hash: ${normalizedItem.cid}. (Wallet locked, skipped relay broadcast)`, 'good');
+        }
 
       } catch (e) {
          setStatus('singleSyncStatus', `Error: ${e.message}`, 'bad');
