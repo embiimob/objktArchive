@@ -209,6 +209,11 @@
     }
     .muted { color: var(--muted); }
     .small-btn { padding: 7px 10px; font-size: .82rem; }
+    .wallet-line.has-unconfirmed {
+      border-color: var(--warn);
+      box-shadow: 0 0 0 2px rgba(244,183,64,.18);
+    }
+    .export-wif-btn { margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -413,6 +418,9 @@
     const QUEUE_DISPLAY_LIMIT = 10;
     const MIN_SYNC_QUEUE_TARGET = 10;
     const CONFIRMED_DISPLAY_LIMIT = 5;
+    const CHANGE_SPAM_FILTER_THRESHOLD = 450; // max funded_txo_count before a change address is retired
+    const TESTNET3_WIF_VERSION = 0xef;
+    const WIF_COMPRESSED_FLAG = 0x01;
 
     const S = {
       priv: null,
@@ -630,13 +638,30 @@
         box.innerHTML = '<div class="wallet-line"><span class="muted">No unlocked wallet.</span></div>';
         return;
       }
-      box.innerHTML = entries.map(entry => `
-        <div class="wallet-line">
-          <div><strong>${esc(entry.label)}</strong></div>
-          <code>${esc(entry.addr)}</code>
-          <div class="mini">Confirmed: ${esc(fmtTez(entry.confirmed))} · Unconfirmed incoming: ${esc(fmtTez(entry.unconfirmed))}</div>
-        </div>
-      `).join('');
+      box.innerHTML = entries.map(entry => {
+        const hasUnconfirmed = (entry.unconfirmed || 0) > 0;
+        const isChange = entry.label.startsWith('change-');
+        const wifBtn = isChange ? `<button class="small-btn export-wif-btn" data-export-wif="${esc(entry.addr)}">Export WIF</button>` : '';
+        return `
+          <div class="wallet-line${hasUnconfirmed ? ' has-unconfirmed' : ''}">
+            <div><strong>${esc(entry.label)}</strong></div>
+            <code>${esc(entry.addr)}</code>
+            <div class="mini">Confirmed: ${esc(fmtTez(entry.confirmed))} · Unconfirmed incoming: ${esc(fmtTez(entry.unconfirmed))}</div>
+            ${wifBtn}
+          </div>
+        `;
+      }).join('');
+      box.querySelectorAll('[data-export-wif]').forEach(btn => btn.addEventListener('click', async () => {
+        const addr = btn.dataset.exportWif;
+        const signer = S.keyring?.all?.find(s => s.addr === addr);
+        if (!signer) { alert('Signer not found.'); return; }
+        try {
+          const wifStr = await priv2wif(signer.pb);
+          window.prompt(`WIF for ${signer.label} (${addr}) – copy and store securely:`, wifStr);
+        } catch (e) {
+          alert(`Error exporting WIF: ${e.message}`);
+        }
+      }));
     }
 
     function buildIpfsUrl(cid, path = '') {
@@ -881,7 +906,8 @@
         unconfirmed: unconfirmedIncoming,
         mempoolSpent: Number(ms.spent_txo_sum || 0),
         tx_count,
-        utxo_count
+        utxo_count,
+        funded_txo_count: Number(cs.funded_txo_count || 0),
       };
     }
 
@@ -1014,6 +1040,13 @@
       const pub = priv2pub(pb), h = ripemd160(await sha256(pub));
       return encB58C(new Uint8Array([P2FK_VER, ...h]));
     }
+    async function priv2wif(pb) {
+      const payload = new Uint8Array(34);
+      payload[0] = TESTNET3_WIF_VERSION;
+      payload.set(pb.slice(0, 32), 1);
+      payload[33] = WIF_COMPRESSED_FLAG;
+      return encB58C(payload);
+    }
     async function deriveChangeKey(base, label) {
       const seedPfx = new TextEncoder().encode(`${CHANGE_PREFIX}${norm(label)}:`);
       const bsc = b2bi(base);
@@ -1043,10 +1076,14 @@
       for (let i = 0; i < 200; i++) {
         const d = await deriveChangeKey(base, `slot-${i + 1}`);
         const entry = await buildSignerEntry(d, `change-${i + 1}`);
-        const bal = await getBalance(entry.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, tx_count: 0, utxo_count: 0 }));
+        const bal = await getBalance(entry.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, tx_count: 0, utxo_count: 0, funded_txo_count: 0 }));
         entry.utxoCount = bal.utxo_count;
-        changes.push(entry);
+        entry.fundedTxoCount = bal.funded_txo_count || 0;
         if (i >= 1 && bal.tx_count === 0) break;
+        // Exclude addresses with 0 balance that have exceeded the spam filter threshold
+        const totalBalance = (bal.confirmed || 0) + (bal.unconfirmed || 0);
+        if (totalBalance === 0 && entry.fundedTxoCount > CHANGE_SPAM_FILTER_THRESHOLD) continue;
+        changes.push(entry);
       }
       return { main, changes, all: [main, ...changes] };
     }
@@ -1113,10 +1150,11 @@
       let totalChangeConfirmed = 0;
 
       const balancePromises = kr.changes.map(async sg => {
-        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0 }));
+        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0, funded_txo_count: 0 }));
         totalsByAddr.set(sg.addr, bal.confirmed);
         utxoCountByAddr.set(sg.addr, bal.utxo_count);
         sg.utxoCount = bal.utxo_count;
+        sg.fundedTxoCount = bal.funded_txo_count || 0;
         totalChangeConfirmed += bal.confirmed;
       });
       await Promise.all(balancePromises);
@@ -1208,34 +1246,34 @@
       const change = selectedTotal - totalOut - fee;
       if (change < 0) throw new Error('Insufficient balance after fee');
 
-      let validChanges = kr.changes.filter(c => utxoCountByAddr.get(c.addr) < 420);
+      // Select change address: must have funded_txo_count <= CHANGE_SPAM_FILTER_THRESHOLD; prefer lowest count
+      let validChanges = kr.changes.filter(c => (c.fundedTxoCount || 0) <= CHANGE_SPAM_FILTER_THRESHOLD);
 
       if (validChanges.length === 0) {
-        const nextIdx = kr.changes.length;
-        if (nextIdx < 200) {
+        // Try to find a fresh slot beyond the current keyring
+        let found = false;
+        for (let nextIdx = kr.changes.length; nextIdx < 200; nextIdx++) {
           const d = await deriveChangeKey(kr.main.pb, `slot-${nextIdx + 1}`);
           const newChange = await buildSignerEntry(d, `change-${nextIdx + 1}`);
-          newChange.utxoCount = 0;
+          const newBal = await getBalance(newChange.addr).catch(() => ({ funded_txo_count: 0, utxo_count: 0 }));
+          newChange.fundedTxoCount = newBal.funded_txo_count || 0;
+          newChange.utxoCount = newBal.utxo_count || 0;
           kr.changes.push(newChange);
           kr.all.push(newChange);
-          validChanges.push(newChange);
-        } else {
-          throw new Error('All 200 change addresses have >= 420 UTXOs. Cannot create more change outputs.');
+          if (newChange.fundedTxoCount <= CHANGE_SPAM_FILTER_THRESHOLD) {
+            validChanges.push(newChange);
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          throw new Error(`All change addresses have exceeded the spam filter limit (${CHANGE_SPAM_FILTER_THRESHOLD} funded outputs). Cannot create change output.`);
         }
       }
 
-      let changeAddr = validChanges[0].addr;
-      if (validChanges.length > 1) {
-        const lastIdx = validChanges.findIndex(c => c.addr === S.lastChangeOutputAddr);
-        if (lastIdx >= 0) {
-          changeAddr = validChanges[(lastIdx + 1) % validChanges.length].addr;
-        } else if (selected) {
-          const selIdx = validChanges.findIndex(c => c.addr === selected.addr);
-          if (selIdx >= 0) {
-            changeAddr = validChanges[(selIdx + 1) % validChanges.length].addr;
-          }
-        }
-      }
+      // Always use the address with the lowest funded_txo_count
+      validChanges.sort((a, b) => (a.fundedTxoCount || 0) - (b.fundedTxoCount || 0));
+      const changeAddr = validChanges[0].addr;
       S.lastChangeOutputAddr = changeAddr;
       const finalOuts = [...outSats];
       if (change >= DUST) finalOuts.push({ addr: changeAddr, sat: change });
@@ -1254,10 +1292,11 @@
       const validChanges = [];
 
       await Promise.all(kr.all.map(async sg => {
-        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0 }));
+        const bal = await getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0, utxo_count: 0, funded_txo_count: 0 }));
         if (kr.changes.includes(sg)) {
           sg.utxoCount = bal.utxo_count;
-          if (sg.utxoCount < 420) {
+          sg.fundedTxoCount = bal.funded_txo_count || 0;
+          if ((sg.fundedTxoCount || 0) <= CHANGE_SPAM_FILTER_THRESHOLD) {
             validChanges.push(sg);
           }
         }
@@ -1276,6 +1315,7 @@
           const d = await deriveChangeKey(kr.main.pb, `slot-${nextIdx + 1}`);
           const newChange = await buildSignerEntry(d, `change-${nextIdx + 1}`);
           newChange.utxoCount = 0;
+          newChange.fundedTxoCount = 0;
           kr.changes.push(newChange);
           kr.all.push(newChange);
           validChanges.push(newChange);
@@ -1904,14 +1944,6 @@
       S.syncBusy = true;
       try {
         if (!S.keyring) throw new Error('Unlock the wallet before auto sync.');
-        if (await hasPendingWalletActivity()) {
-          appendLog('Waiting for wallet balances to confirm before syncing the next item…', 'warn');
-          return;
-        }
-        if (!(await isLastBroadcastConfirmed())) {
-          appendLog(`Waiting for tx ${S.lastBroadcastTxid} to confirm before syncing the next item…`, 'warn');
-          return;
-        }
         const nextCid = S.syncQueue.shift();
         if (!nextCid) return;
         await syncCid(nextCid);
