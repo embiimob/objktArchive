@@ -213,6 +213,7 @@
       border-color: var(--warn);
       box-shadow: 0 0 0 2px rgba(244,183,64,.18);
     }
+    .export-wif-btn { margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -417,6 +418,9 @@
     const QUEUE_DISPLAY_LIMIT = 10;
     const MIN_SYNC_QUEUE_TARGET = 10;
     const CONFIRMED_DISPLAY_LIMIT = 5;
+    const CHANGE_SPAM_FILTER_THRESHOLD = 450; // max funded_txo_count before a change address is retired
+    const TESTNET3_WIF_VERSION = 0xef;
+    const WIF_COMPRESSED_FLAG = 0x01;
 
     const S = {
       priv: null,
@@ -637,7 +641,7 @@
       box.innerHTML = entries.map(entry => {
         const hasUnconfirmed = (entry.unconfirmed || 0) > 0;
         const isChange = entry.label.startsWith('change-');
-        const wifBtn = isChange ? `<button class="small-btn" data-export-wif="${esc(entry.addr)}" style="margin-top:6px">Export WIF</button>` : '';
+        const wifBtn = isChange ? `<button class="small-btn export-wif-btn" data-export-wif="${esc(entry.addr)}">Export WIF</button>` : '';
         return `
           <div class="wallet-line${hasUnconfirmed ? ' has-unconfirmed' : ''}">
             <div><strong>${esc(entry.label)}</strong></div>
@@ -1038,9 +1042,9 @@
     }
     async function priv2wif(pb) {
       const payload = new Uint8Array(34);
-      payload[0] = 0xef;
+      payload[0] = TESTNET3_WIF_VERSION;
       payload.set(pb.slice(0, 32), 1);
-      payload[33] = 0x01;
+      payload[33] = WIF_COMPRESSED_FLAG;
       return encB58C(payload);
     }
     async function deriveChangeKey(base, label) {
@@ -1078,7 +1082,7 @@
         if (i >= 1 && bal.tx_count === 0) break;
         // Exclude addresses with 0 balance that have exceeded the spam filter threshold
         const totalBalance = (bal.confirmed || 0) + (bal.unconfirmed || 0);
-        if (totalBalance === 0 && entry.fundedTxoCount > 450) continue;
+        if (totalBalance === 0 && entry.fundedTxoCount > CHANGE_SPAM_FILTER_THRESHOLD) continue;
         changes.push(entry);
       }
       return { main, changes, all: [main, ...changes] };
@@ -1242,8 +1246,8 @@
       const change = selectedTotal - totalOut - fee;
       if (change < 0) throw new Error('Insufficient balance after fee');
 
-      // Select change address: must have funded_txo_count <= 450 (spam filter safe); prefer lowest count
-      let validChanges = kr.changes.filter(c => (c.fundedTxoCount || 0) <= 450);
+      // Select change address: must have funded_txo_count <= CHANGE_SPAM_FILTER_THRESHOLD; prefer lowest count
+      let validChanges = kr.changes.filter(c => (c.fundedTxoCount || 0) <= CHANGE_SPAM_FILTER_THRESHOLD);
 
       if (validChanges.length === 0) {
         // Try to find a fresh slot beyond the current keyring
@@ -1256,14 +1260,14 @@
           newChange.utxoCount = newBal.utxo_count || 0;
           kr.changes.push(newChange);
           kr.all.push(newChange);
-          if (newChange.fundedTxoCount <= 450) {
+          if (newChange.fundedTxoCount <= CHANGE_SPAM_FILTER_THRESHOLD) {
             validChanges.push(newChange);
             found = true;
             break;
           }
         }
         if (!found) {
-          throw new Error('All change addresses have exceeded the spam filter limit (450 funded outputs). Cannot create change output.');
+          throw new Error(`All change addresses have exceeded the spam filter limit (${CHANGE_SPAM_FILTER_THRESHOLD} funded outputs). Cannot create change output.`);
         }
       }
 
@@ -1292,7 +1296,7 @@
         if (kr.changes.includes(sg)) {
           sg.utxoCount = bal.utxo_count;
           sg.fundedTxoCount = bal.funded_txo_count || 0;
-          if ((sg.fundedTxoCount || 0) <= 450) {
+          if ((sg.fundedTxoCount || 0) <= CHANGE_SPAM_FILTER_THRESHOLD) {
             validChanges.push(sg);
           }
         }
