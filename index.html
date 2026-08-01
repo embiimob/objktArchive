@@ -1954,6 +1954,20 @@
       let nextCid;
       try {
         if (!S.keyring) throw new Error('Unlock the wallet before auto sync.');
+
+        // Before attempting to broadcast, check whether any change address has unconfirmed
+        // incoming funds but zero confirmed balance.  If so, skip this tick and wait for
+        // the pending confirmation rather than attempting (and failing) a broadcast.
+        const changeBalances = await Promise.all(
+          S.keyring.changes.map(sg => getBalance(sg.addr).catch(() => ({ confirmed: 0, unconfirmed: 0 })))
+        );
+        const totalChangeConfirmed = changeBalances.reduce((s, b) => s + (b.confirmed || 0), 0);
+        const totalChangeUnconfirmed = changeBalances.reduce((s, b) => s + (b.unconfirmed || 0), 0);
+        if (totalChangeConfirmed === 0 && totalChangeUnconfirmed > 0) {
+          appendLog('Change address has unconfirmed incoming funds. Waiting for confirmation before next sync attempt.', 'warn');
+          return;
+        }
+
         nextCid = S.syncQueue.shift();
         if (!nextCid) return;
         await syncCid(nextCid);
@@ -1963,12 +1977,22 @@
         }
       } catch (error) {
         if (/insufficient funds|insufficient balance|no confirmed funds/i.test(error.message)) {
-          S.syncQueue.unshift(nextCid);
-          setSyncState(nextCid, { status: 'queued', queueRank: 0 });
-          S.syncRunning = false;
-          if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
-          appendLog(`Auto sync paused: ${error.message}. Fund your wallet and restart auto sync.`, 'bad');
-          setStatus('analysisStatus', 'Auto sync paused: insufficient funds. Fund your wallet and restart.', 'bad');
+          if (nextCid) {
+            S.syncQueue.unshift(nextCid);
+            setSyncState(nextCid, { status: 'queued', queueRank: 0 });
+          }
+          // Only pause the timer when all change addresses have confirmed and there are
+          // genuinely no funds.  If any address still has pending unconfirmed activity,
+          // just wait for the next tick instead of stopping auto-sync entirely.
+          const hasPending = await hasPendingWalletActivity().catch(() => false);
+          if (hasPending) {
+            appendLog(`Insufficient confirmed funds; a change address is still pending confirmation. Will retry on next sync cycle.`, 'warn');
+          } else {
+            S.syncRunning = false;
+            if (S.syncTimer) { clearInterval(S.syncTimer); S.syncTimer = null; }
+            appendLog(`Auto sync paused: ${error.message}. Fund your wallet and restart auto sync.`, 'bad');
+            setStatus('analysisStatus', 'Auto sync paused: insufficient funds. Fund your wallet and restart.', 'bad');
+          }
         } else {
           appendLog(`Auto sync error: ${error.message}`, 'bad');
         }
