@@ -267,7 +267,7 @@
           </div>
           <div class="field">
             <label for="gatewayInput">Preferred IPFS gateway for size checks</label>
-            <input id="gatewayInput" value="https://ipfs.io/ipfs/" autocomplete="off" spellcheck="false">
+            <input id="gatewayInput" value="https://ipfs.filebase.io/ipfs/" autocomplete="off" spellcheck="false">
           </div>
         </div>
         <div class="field">
@@ -495,7 +495,7 @@
     function getMempoolApi() { return norm($('mempoolInput').value) || 'https://mempool.space/testnet/api'; }
     function getObjktApi() { return norm($('objktInput').value) || 'https://data.objkt.com/v3/graphql'; }
     function getGatewayBase() {
-      const raw = norm($('gatewayInput').value) || 'https://ipfs.io/ipfs/';
+      const raw = norm($('gatewayInput').value) || 'https://ipfs.filebase.io/ipfs//';
       return raw.endsWith('/') ? raw : `${raw}/`;
     }
     function getExtraKeywords() {
